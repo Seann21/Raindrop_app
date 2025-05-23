@@ -1,0 +1,34 @@
+name: raindrop_app
+description: "A Weather App Build to Help in some people"
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ^3.7.2
+
+dependencies:
+  cupertino_icons: ^1.0.8
+  dio: ^5.8.0+1
+  flutter:
+    sdk: flutter
+  flutter_dotenv: ^5.2.1
+  flutter_local_notifications: ^19.2.0
+  flutter_riverpod: ^2.6.1
+  geolocator: ^13.0.4
+  intl: ^0.20.2
+  jiffy: ^6.4.0
+  shared_preferences: ^2.5.3
+  timezone: ^0.10.1
+
+dev_dependencies:
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
+    - assets/rainy.png
+    - assets/cloudy.png
+    - assets/clear.png
+    - assets/thunder.png
+    - assets/snowy.png
