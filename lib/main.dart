@@ -7,7 +7,7 @@ import '../screens/home_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final sharedPreferences = await SharedPreferences.getInstance();
-  
+
   runApp(
     ProviderScope(
       overrides: [
@@ -24,7 +24,7 @@ class MyApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isDarkMode = ref.watch(themeProvider);
-    
+
     return MaterialApp(
       title: 'Weather App',
       debugShowCheckedModeBanner: false,
@@ -34,9 +34,10 @@ class MyApp extends ConsumerWidget {
           seedColor: const Color(0xFF8B80F8),
           brightness: isDarkMode ? Brightness.dark : Brightness.light,
         ),
-        scaffoldBackgroundColor: isDarkMode 
-          ? const Color(0xFF1A1A2E) 
-          : const Color.fromARGB(255, 226, 231, 241),
+        scaffoldBackgroundColor:
+            isDarkMode
+                ? const Color(0xFF1A1A2E)
+                : const Color.fromARGB(255, 226, 231, 241),
       ),
       home: const HomeScreen(),
     );
