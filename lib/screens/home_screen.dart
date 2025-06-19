@@ -3,12 +3,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/theme_provider.dart';
 import '../providers/weather_provider.dart';
 import '../screens/search_screen.dart';
+import '../screens/notification_settings_screen.dart';
+import '../screens/alert_history_screen.dart';
 import '../widgets/current_weather_card.dart';
 import '../widgets/forecast_list.dart';
 import '../widgets/weather_details_modal.dart';
-import '../services/notification_service.dart';
+import '../services/enchanced_notification_service.dart';
+import '../services/weather_alert_service.dart';
 import '../models/weather.dart';
+import '../models/weather_alert.dart';
 import 'package:geolocator/geolocator.dart';
+import 'dart:developer' as developer;
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -17,44 +22,89 @@ class HomeScreen extends ConsumerStatefulWidget {
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends ConsumerState<HomeScreen> {
-  final NotificationService notificationService = NotificationService();
+class _HomeScreenState extends ConsumerState<HomeScreen>
+    with WidgetsBindingObserver {
+  final EnhancedNotificationService _notificationService =
+      EnhancedNotificationService();
+  final WeatherAlertService _alertService = WeatherAlertService();
   bool isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    notificationService.initNotification();
+    WidgetsBinding.instance.addObserver(this);
+    _initializeServices();
     _getCurrentLocation();
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _alertService.stopWeatherMonitoring();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _alertService.startWeatherMonitoring();
+        break;
+      case AppLifecycleState.paused:
+        break;
+      case AppLifecycleState.detached:
+        _alertService.stopWeatherMonitoring();
+        break;
+      default:
+        break;
+    }
+  }
+
+  Future<void> _initializeServices() async {
+    try {
+      await _notificationService.initNotification();
+      await _alertService.startWeatherMonitoring();
+
+      await _notificationService.showGeneralNotification(
+        title: '🌤️ Weather App',
+        body:
+            'Weather monitoring is now active. You\'ll receive alerts for extreme weather.',
+        payload: 'welcome',
+      );
+    } catch (e) {
+      developer.log('Error getting location: $e');
+    }
+  }
+
   Future<void> _getCurrentLocation() async {
+    if (!mounted) return;
+
     setState(() {
       isLoading = true;
     });
 
     try {
-      // Cek izin lokasi
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
-          // Jika izin ditolak, gunakan kota default
-          setState(() {
-            isLoading = false;
-          });
+          if (mounted) {
+            setState(() {
+              isLoading = false;
+            });
+          }
           return;
         }
       }
 
       if (permission == LocationPermission.deniedForever) {
-        // Jika izin ditolak selamanya, gunakan kota default
-        setState(() {
-          isLoading = false;
-        });
-
-        // Tampilkan pesan untuk membuka pengaturan
         if (mounted) {
+          setState(() {
+            isLoading = false;
+          });
+
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: const Text(
@@ -70,23 +120,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         return;
       }
 
-      // Dapatkan posisi pengguna
       final position = await ref.read(currentPositionProvider.future);
-      if (position != null) {
-        // Dapatkan cuaca berdasarkan posisi
+      if (position != null && mounted) {
         final weather = await ref.read(weatherByPositionProvider.future);
 
-        // Update provider kota saat ini
         ref
             .read(currentCityProvider.notifier)
             .update((state) => weather.cityName);
 
-        // Cek peringatan cuaca
-        _checkForWeatherAlerts();
+        await _alertService.addCityToMonitoring(weather.cityName);
+        await _checkForWeatherAlerts();
       }
     } catch (e) {
-      // ignore: avoid_print
-      print('Error getting location: $e');
+      developer.log('Error getting location: $e');
 
       if (mounted) {
         ScaffoldMessenger.of(
@@ -104,21 +150,140 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Future<void> _checkForWeatherAlerts() async {
     try {
-      final weatherService = ref.read(weatherServiceProvider);
       final currentCity = ref.read(currentCityProvider);
-      final hasAlert = await weatherService.hasExtremeWeatherAlert(currentCity);
+      final weatherService = ref.read(weatherServiceProvider);
 
-      if (hasAlert) {
-        await notificationService.showNotification(
-          title: 'Weather Alert',
-          body:
-              'Extreme weather conditions expected in $currentCity. Stay safe!',
+      final weather = await weatherService.getWeatherByCity(currentCity);
+      final alerts = _analyzeWeatherForAlerts(weather);
+
+      for (var alert in alerts) {
+        await _notificationService.showExtremeWeatherAlert(
+          city: alert.city,
+          alertType: alert.alertType,
+          description: alert.description,
+          additionalInfo: alert.additionalInfo,
         );
       }
     } catch (e) {
-      // ignore: avoid_print
-      print('Error checking for weather alerts: $e');
+      developer.log('Error getting location: $e');
     }
+  }
+
+  List<WeatherAlert> _analyzeWeatherForAlerts(Weather weather) {
+    List<WeatherAlert> alerts = [];
+
+    if (weather.temperature > 35) {
+      alerts.add(
+        WeatherAlert(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          city: weather.cityName,
+          alertType:
+              weather.temperature > 40 ? 'Extreme Heat' : 'High Temperature',
+          description:
+              'Temperature is ${weather.temperature > 40 ? 'extremely' : 'very'} high at ${weather.temperature.round()}°C',
+          timestamp: DateTime.now(),
+          severity:
+              weather.temperature > 40
+                  ? AlertSeverity.extreme
+                  : AlertSeverity.high,
+          additionalInfo:
+              weather.temperature > 40
+                  ? 'Stay indoors and stay hydrated. Avoid outdoor activities.'
+                  : 'Take precautions when going outside. Stay hydrated.',
+        ),
+      );
+    }
+
+    if (weather.temperature < 5) {
+      alerts.add(
+        WeatherAlert(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          city: weather.cityName,
+          alertType: weather.temperature < 0 ? 'Extreme Cold' : 'Cold Weather',
+          description:
+              'Temperature is ${weather.temperature < 0 ? 'extremely' : 'very'} low at ${weather.temperature.round()}°C',
+          timestamp: DateTime.now(),
+          severity:
+              weather.temperature < 0
+                  ? AlertSeverity.extreme
+                  : AlertSeverity.high,
+          additionalInfo:
+              weather.temperature < 0
+                  ? 'Dress warmly and limit time outdoors. Risk of frostbite.'
+                  : 'Wear appropriate warm clothing.',
+        ),
+      );
+    }
+
+    if (weather.windSpeed > 15) {
+      alerts.add(
+        WeatherAlert(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          city: weather.cityName,
+          alertType:
+              weather.windSpeed > 25 ? 'Strong Winds' : 'Windy Conditions',
+          description:
+              '${weather.windSpeed > 25 ? 'Very strong' : 'Strong'} winds at ${weather.windSpeed.round()} m/s',
+          timestamp: DateTime.now(),
+          severity:
+              weather.windSpeed > 25
+                  ? AlertSeverity.high
+                  : AlertSeverity.moderate,
+          additionalInfo:
+              weather.windSpeed > 25
+                  ? 'Avoid outdoor activities. Secure loose objects.'
+                  : 'Be cautious when driving or walking.',
+        ),
+      );
+    }
+
+    switch (weather.description.toLowerCase()) {
+      case 'thunderstorm':
+        alerts.add(
+          WeatherAlert(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            city: weather.cityName,
+            alertType: 'Thunderstorm',
+            description: 'Thunderstorm conditions detected',
+            timestamp: DateTime.now(),
+            severity: AlertSeverity.high,
+            additionalInfo:
+                'Stay indoors and avoid electrical appliances. Do not use umbrellas.',
+          ),
+        );
+        break;
+      case 'rain':
+        if (weather.humidity > 85) {
+          alerts.add(
+            WeatherAlert(
+              id: DateTime.now().millisecondsSinceEpoch.toString(),
+              city: weather.cityName,
+              alertType: 'Heavy Rain',
+              description: 'Heavy rain conditions with high humidity',
+              timestamp: DateTime.now(),
+              severity: AlertSeverity.moderate,
+              additionalInfo: 'Drive carefully and avoid flooded areas.',
+            ),
+          );
+        }
+        break;
+      case 'snow':
+        alerts.add(
+          WeatherAlert(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            city: weather.cityName,
+            alertType: 'Snow',
+            description: 'Snow conditions detected',
+            timestamp: DateTime.now(),
+            severity: AlertSeverity.moderate,
+            additionalInfo:
+                'Drive carefully and dress warmly. Roads may be slippery.',
+          ),
+        );
+        break;
+    }
+
+    return alerts;
   }
 
   void _showWeatherDetails(Weather weather) {
@@ -135,7 +300,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final isDarkMode = ref.watch(themeProvider);
     final currentCity = ref.watch(currentCityProvider);
 
-    // Jika masih loading, tampilkan indikator loading
     if (isLoading) {
       return Scaffold(
         backgroundColor:
@@ -181,6 +345,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
                   Row(
                     children: [
+                      // Notification settings button
+                      IconButton(
+                        icon: const Icon(Icons.notifications_outlined),
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder:
+                                  (context) =>
+                                      const NotificationSettingsScreen(),
+                            ),
+                          );
+                        },
+                        tooltip: 'Notification Settings',
+                      ),
+
+                      // Alert history button
+                      IconButton(
+                        icon: const Icon(Icons.history),
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const AlertHistoryScreen(),
+                            ),
+                          );
+                        },
+                        tooltip: 'Alert History',
+                      ),
+
                       // Refresh button
                       IconButton(
                         icon: const Icon(Icons.refresh),
@@ -189,13 +383,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           ref.invalidate(forecastProvider(currentCity));
                           _checkForWeatherAlerts();
                         },
+                        tooltip: 'Refresh Weather',
                       ),
 
-                      // Location button - now has two functions
+                      // Location button
                       IconButton(
                         icon: const Icon(Icons.location_on_outlined),
                         onPressed: () {
-                          // Show dialog to choose between current location or search
                           showDialog(
                             context: context,
                             builder:
@@ -227,7 +421,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                                       const SearchScreen(),
                                             ),
                                           ).then((selectedCity) {
-                                            if (selectedCity != null) {
+                                            if (selectedCity != null &&
+                                                mounted) {
                                               ref
                                                   .read(
                                                     currentCityProvider
@@ -236,6 +431,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                                   .update(
                                                     (state) => selectedCity,
                                                   );
+                                              _alertService.addCityToMonitoring(
+                                                selectedCity,
+                                              );
                                               _checkForWeatherAlerts();
                                             }
                                           });
@@ -246,6 +444,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                 ),
                           );
                         },
+                        tooltip: 'Change Location',
                       ),
                     ],
                   ),
@@ -283,7 +482,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                     color: Colors.red,
                                   ),
                                   const SizedBox(height: 16),
-                                  Text(
+                                  const Text(
                                     'Error loading weather data',
                                     textAlign: TextAlign.center,
                                     style: TextStyle(
@@ -310,7 +509,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
               const SizedBox(height: 20),
 
-              // Forecast list - now includes the header inside with info button
+              // Forecast list
               Consumer(
                 builder: (context, ref, child) {
                   final weatherAsync = ref.watch(weatherProvider(currentCity));
@@ -335,43 +534,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                               color: const Color(0xFF6A5ACD).withAlpha(60),
                               borderRadius: BorderRadius.circular(20),
                             ),
-                            child: Column(
-                              children: [
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 12,
-                                  ),
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      const Text(
-                                        'day forecast',
-                                        style: TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w500,
-                                          color: Colors.white70,
-                                        ),
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(
-                                          Icons.info_outline,
-                                          color: Colors.white70,
-                                        ),
-                                        onPressed: () {},
-                                        padding: EdgeInsets.zero,
-                                        constraints: const BoxConstraints(),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const Expanded(
-                                  child: Center(
-                                    child: CircularProgressIndicator(),
-                                  ),
-                                ),
-                              ],
+                            child: const Center(
+                              child: CircularProgressIndicator(),
                             ),
                           ),
                         ),
@@ -382,77 +546,35 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                               color: const Color(0xFF6A5ACD).withAlpha(60),
                               borderRadius: BorderRadius.circular(20),
                             ),
-                            child: Column(
-                              children: [
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 12,
+                            child: Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(
+                                    Icons.error_outline,
+                                    size: 48,
+                                    color: Colors.red,
                                   ),
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      const Text(
-                                        'day forecast',
-                                        style: TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w500,
-                                          color: Colors.white70,
-                                        ),
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(
-                                          Icons.info_outline,
-                                          color: Colors.white70,
-                                        ),
-                                        onPressed: () {},
-                                        padding: EdgeInsets.zero,
-                                        constraints: const BoxConstraints(),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Expanded(
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(16.0),
-                                    child: Column(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        const Icon(
-                                          Icons.error_outline,
-                                          size: 48,
-                                          color: Colors.red,
-                                        ),
-                                        const SizedBox(height: 16),
-                                        const Text(
-                                          'Failed to load forecast data',
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                        const SizedBox(height: 8),
-                                        const Text(
-                                          'Please check your internet connection and try again.',
-                                          textAlign: TextAlign.center,
-                                        ),
-                                        const SizedBox(height: 16),
-                                        ElevatedButton(
-                                          onPressed: () {
-                                            ref.invalidate(
-                                              forecastProvider(currentCity),
-                                            );
-                                          },
-                                          child: const Text('Retry'),
-                                        ),
-                                      ],
+                                  const SizedBox(height: 16),
+                                  const Text(
+                                    'Failed to load forecast data',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
                                     ),
+                                    textAlign: TextAlign.center,
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(height: 16),
+                                  ElevatedButton(
+                                    onPressed: () {
+                                      ref.invalidate(
+                                        forecastProvider(currentCity),
+                                      );
+                                    },
+                                    child: const Text('Retry'),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
