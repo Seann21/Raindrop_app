@@ -89,6 +89,7 @@ class WeatherService {
     'Banjar',
     'Sampang',
     'Serang',
+    'Jakarta',
 
     // Bali
     'Denpasar',
